@@ -1,12 +1,4 @@
 # run_and_plot.py
-"""
-Run llm.main(), extract LATENCY measurements, save CSV, and save:
- - log-scaled bar chart
- - pie chart of total latency share
-
-Names are mapped to standard Transformer terminology.
-"""
-
 import os
 import sys
 import traceback
@@ -29,7 +21,13 @@ except Exception:
 
 
 # ------------------------------------------------------------
-# 🔹 STANDARD TRANSFORMER NAME MAPPING
+# Sequence lengths to benchmark
+# ------------------------------------------------------------
+SEQ_LENGTHS = [512, 1024, 2048, 4096, 8192]
+
+
+# ------------------------------------------------------------
+# Name mapping
 # ------------------------------------------------------------
 NAME_MAP = {
     "attn.qkv_projection": "QKV Projection",
@@ -38,6 +36,7 @@ NAME_MAP = {
     "attn.softmax": "Softmax",
     "attn.weighted_sum": "Attention Weighted Sum",
     "attn.out_projection": "Output Projection",
+    "attn.cache_concat": "KV Cache Concat",
     "block.norm1": "LayerNorm (Pre-Attention)",
     "block.norm2": "LayerNorm (Pre-FFN)",
     "ff.linear1": "FFN Linear 1",
@@ -52,202 +51,169 @@ def pretty_name(name: str) -> str:
 
 
 # ------------------------------------------------------------
-# Extract Latency Data
+# Extract latency stats into a DataFrame
 # ------------------------------------------------------------
 def extract_stats_from_latency(latency_recorder) -> pd.DataFrame:
     rows = []
     for name, stat in latency_recorder.data.items():
         count = int(stat.get("count", 0))
         total = float(stat.get("total", 0.0))
-        minv = float(stat.get("min", 0.0))
-        maxv = float(stat.get("max", 0.0))
-        avg = total / count if count > 0 else 0.0
-
+        minv  = float(stat.get("min", 0.0))
+        maxv  = float(stat.get("max", 0.0))
+        avg   = total / count if count > 0 else 0.0
         rows.append({
-            "name": name,
+            "name":        name,
             "pretty_name": pretty_name(name),
-            "count": count,
-            "total": total,
-            "avg": avg,
-            "min": minv,
-            "max": maxv
+            "count":       count,
+            "total":       total,
+            "avg":         avg,
+            "min":         minv,
+            "max":         maxv,
         })
-
     return pd.DataFrame(rows)
 
 
 # ------------------------------------------------------------
-# Log-Scale Bar Chart
+# Per-run plots (log bar + pie) — same as before
 # ------------------------------------------------------------
-def plot_latency_logscale(df: pd.DataFrame, out_path: str):
+def plot_latency_logscale(df: pd.DataFrame, out_path: str, title_suffix: str = ""):
     df_plot = df.sort_values("avg", ascending=False)
-
     x = np.arange(len(df_plot))
-    avg = df_plot["avg"].values
+    avg  = df_plot["avg"].values
     mins = df_plot["min"].values
     maxs = df_plot["max"].values
-
     lower_err = np.maximum(avg - mins, 1e-12)
     upper_err = np.maximum(maxs - avg, 1e-12)
 
     plt.figure(figsize=(12, 6))
     plt.bar(x, avg)
-    plt.errorbar(x, avg, yerr=[lower_err, upper_err], fmt='none', capsize=4)
-
+    plt.errorbar(x, avg, yerr=[lower_err, upper_err], fmt="none", capsize=4)
     plt.xticks(x, df_plot["pretty_name"], rotation=45, ha="right")
     plt.ylabel("Latency (seconds) — Log Scale")
     plt.yscale("log")
-    plt.title("Transformer Operation Latency")
+    plt.title(f"Transformer Operation Latency{title_suffix}")
     plt.grid(axis="y", which="both", linestyle="--", alpha=0.5)
-
     plt.tight_layout()
     plt.savefig(out_path, dpi=200)
     plt.close()
-    print(f"Saved bar chart → {out_path}")
+    print(f"  Saved bar chart  → {out_path}")
 
 
-# ------------------------------------------------------------
-# Pie Chart (Total Latency Share)
-# ------------------------------------------------------------
-def plot_latency_pie(df: pd.DataFrame, out_path: str):
-    """
-    Publication-quality pie chart grouped by Transformer block:
-    - Self-Attention
-    - Feed Forward Network (FFN)
-    - LayerNorm
-    - Output Head
-    """
-
-    # --------------------------------------------------
-    # 1️⃣  GROUP OPERATIONS INTO HIGH-LEVEL BLOCKS
-    # --------------------------------------------------
+def plot_latency_pie(df: pd.DataFrame, out_path: str, title_suffix: str = ""):
     def group_block(name: str) -> str:
-        if name.startswith("attn."):
-            return "Self-Attention"
-        elif name.startswith("ff."):
-            return "Feed Forward Network"
-        elif name.startswith("block.norm"):
-            return "Layer Normalization"
-        elif name.startswith("model.output_head"):
-            return "Output Head"
-        else:
-            return "Other"
+        if name.startswith("attn."):       return "Self-Attention"
+        elif name.startswith("ff."):       return "Feed Forward Network"
+        elif name.startswith("block.norm"): return "Layer Normalization"
+        elif name.startswith("model."):    return "Output Head"
+        else:                              return "Other"
 
-    df_grouped = df.copy()
-    df_grouped["block"] = df_grouped["name"].apply(group_block)
+    df_g = df.copy()
+    df_g["block"] = df_g["name"].apply(group_block)
+    grouped = df_g.groupby("block")["total"].sum().sort_values(ascending=False)
 
-    grouped = (
-        df_grouped
-        .groupby("block")["total"]
-        .sum()
-        .sort_values(ascending=False)
-    )
+    colors  = ["#4C72B0", "#DD8452", "#55A868", "#C44E52", "#8172B3"][:len(grouped)]
+    explode = [0.06 if i == 0 else 0 for i in range(len(grouped))]
 
-    sizes = grouped.values
-    labels = grouped.index.tolist()
-
-    # --------------------------------------------------
-    # 2️⃣  PROFESSIONAL COLOR PALETTE
-    # --------------------------------------------------
-    colors = [
-        "#4C72B0",  # blue (attention)
-        "#DD8452",  # orange (ffn)
-        "#55A868",  # green (norm)
-        "#C44E52",  # red (output)
-        "#8172B3"   # fallback
-    ][:len(sizes)]
-
-    # Slightly explode largest slice
-    explode = [0.06 if i == 0 else 0 for i in range(len(sizes))]
-
-    # --------------------------------------------------
-    # 3️⃣  DRAW FIGURE
-    # --------------------------------------------------
     plt.figure(figsize=(8, 8))
-
     wedges, texts, autotexts = plt.pie(
-        sizes,
-        labels=None,  # keep slices clean
-        colors=colors,
+        grouped.values, labels=None, colors=colors,
         autopct=lambda p: f"{p:.1f}%" if p > 3 else "",
-        startangle=90,
-        counterclock=False,
-        explode=explode,
-        wedgeprops=dict(edgecolor="white", linewidth=1.2),
-        pctdistance=0.75
+        startangle=90, counterclock=False, explode=explode,
+        wedgeprops=dict(edgecolor="white", linewidth=1.2), pctdistance=0.75,
     )
-
-    # Make percentage text bold and readable
-    for autotext in autotexts:
-        autotext.set_fontsize(11)
-        autotext.set_fontweight("bold")
-        autotext.set_color("white")
-
-    # --------------------------------------------------
-    # 4️⃣  LEGEND
-    # --------------------------------------------------
-    plt.legend(
-        wedges,
-        labels,
-        title="Transformer Components",
-        loc="center left",
-        bbox_to_anchor=(1, 0.5),
-        fontsize=11,
-        title_fontsize=12,
-        frameon=False
-    )
-
-    # --------------------------------------------------
-    # 5️⃣  TITLE
-    # --------------------------------------------------
-    plt.title(
-        "Latency Distribution Across Transformer Blocks",
-        fontsize=15,
-        fontweight="bold",
-        pad=20
-    )
-
+    for at in autotexts:
+        at.set_fontsize(11); at.set_fontweight("bold"); at.set_color("white")
+    plt.legend(wedges, grouped.index.tolist(), title="Transformer Components",
+               loc="center left", bbox_to_anchor=(1, 0.5),
+               fontsize=11, title_fontsize=12, frameon=False)
+    plt.title(f"Latency Distribution{title_suffix}", fontsize=15,
+              fontweight="bold", pad=20)
     plt.axis("equal")
     plt.tight_layout()
-
     plt.savefig(out_path, dpi=300, bbox_inches="tight")
     plt.close()
+    print(f"  Saved pie chart  → {out_path}")
 
-    print(f"Saved polished pie chart → {out_path}")
+
+# ------------------------------------------------------------
+# Comparison plot — avg latency vs sequence length per op
+# ------------------------------------------------------------
+def plot_comparison(all_dfs: dict, out_dir: str):
+    """Line plot: x = seq_len, y = avg latency, one line per operation."""
+    # Build a wide DataFrame: index=seq_len, columns=pretty_name
+    records = []
+    for seq_len, df in all_dfs.items():
+        for _, row in df.iterrows():
+            records.append({"seq_len": seq_len, "pretty_name": row["pretty_name"], "avg": row["avg"]})
+    wide = pd.DataFrame(records).pivot(index="seq_len", columns="pretty_name", values="avg")
+
+    plt.figure(figsize=(13, 7))
+    for col in wide.columns:
+        plt.plot(wide.index, wide[col], marker="o", label=col)
+    plt.xlabel("Sequence Length")
+    plt.ylabel("Avg Latency (seconds) — Log Scale")
+    plt.yscale("log")
+    plt.title("Avg Latency vs Sequence Length per Operation")
+    plt.legend(bbox_to_anchor=(1.01, 1), loc="upper left", fontsize=8, frameon=False)
+    plt.grid(which="both", linestyle="--", alpha=0.4)
+    plt.tight_layout()
+    path = os.path.join(out_dir, "comparison_avg_latency.png")
+    plt.savefig(path, dpi=200, bbox_inches="tight")
+    plt.close()
+    print(f"Saved comparison plot → {path}")
+
 
 # ------------------------------------------------------------
 # Main
 # ------------------------------------------------------------
 def main():
-    print("Running llm.main()...")
-    try:
-        llm_kv.main()
-    except Exception:
-        print("llm.main() raised an exception.")
-        traceback.print_exc()
+    out_dir = "latency_results"
+    os.makedirs(out_dir, exist_ok=True)
 
-    LATENCY = getattr(llm_kv, "LATENCY", None)
-    if LATENCY is None:
-        print("LATENCY not found.")
-        sys.exit(1)
+    all_dfs = {}   # seq_len -> DataFrame
 
-    df = extract_stats_from_latency(LATENCY)
-    if df.empty:
-        print("No latency data recorded.")
-        sys.exit(1)
+    for seq_len in SEQ_LENGTHS:
+        print(f"\n{'='*50}")
+        print(f"  Running seq_len = {seq_len}")
+        print(f"{'='*50}")
 
-    os.makedirs("latency_results", exist_ok=True)
+        # Reset LATENCY recorder before each run
+        llm_kv.LATENCY = llm_kv.LatencyRecorder(
+            use_cuda=__import__("torch").cuda.is_available()
+        )
 
-    df.to_csv("latency_results/latency_report.csv", index=False)
-    print("Saved CSV → latency_results/latency_report.csv")
+        # Inject seq_len so llm_kv.main() picks it up
+        llm_kv.SEQ_LEN = seq_len
 
-    plot_latency_logscale(df, "latency_results/latency_log_bar.png")
-    plot_latency_pie(df, "latency_results/latency_pie.png")
+        try:
+            llm_kv.main()
+        except Exception:
+            print(f"  llm_kv.main() failed for seq_len={seq_len}")
+            traceback.print_exc()
+            continue
 
-    print("\nTop by average latency:")
-    print(df.sort_values("avg", ascending=False)[
-        ["pretty_name", "avg"]
-    ].to_string(index=False, float_format="{:.6e}".format))
+        LATENCY = getattr(llm_kv, "LATENCY", None)
+        if LATENCY is None or not LATENCY.data:
+            print(f"  No latency data for seq_len={seq_len}, skipping.")
+            continue
+
+        df = extract_stats_from_latency(LATENCY)
+        all_dfs[seq_len] = df
+
+        # Save per-run CSV
+        csv_path = os.path.join(out_dir, f"latency_seqlen_{seq_len}.csv")
+        df.to_csv(csv_path, index=False)
+        print(f"  Saved CSV        → {csv_path}")
+
+        suffix = f" (seq_len={seq_len})"
+        plot_latency_logscale(df, os.path.join(out_dir, f"bar_seqlen_{seq_len}.png"), suffix)
+        plot_latency_pie(df,      os.path.join(out_dir, f"pie_seqlen_{seq_len}.png"), suffix)
+
+    # Cross-sequence comparison plot
+    if len(all_dfs) > 1:
+        plot_comparison(all_dfs, out_dir)
+
+    print("\nDone.")
 
 
 if __name__ == "__main__":
