@@ -134,7 +134,39 @@ def plot_latency_pie(df: pd.DataFrame, out_path: str, title_suffix: str = ""):
     plt.close()
     print(f"  Saved pie chart  → {out_path}")
 
+# ------------------------------------------------------------
+# Comparison plot — latency share (%) vs sequence length per op
+# ------------------------------------------------------------
+def plot_comparison_pct(all_dfs: dict, out_dir: str):
+    """Line plot: x = seq_len, y = each op's % share of total avg latency."""
+    records = []
+    for seq_len, df in all_dfs.items():
+        total = df["avg"].sum()
+        for _, row in df.iterrows():
+            records.append({
+                "seq_len":     seq_len,
+                "pretty_name": row["pretty_name"],
+                "pct":         (row["avg"] / total * 100) if total > 0 else 0.0,
+            })
 
+    wide = pd.DataFrame(records).pivot(index="seq_len", columns="pretty_name", values="pct")
+
+    plt.figure(figsize=(13, 7))
+    for col in wide.columns:
+        plt.plot(wide.index, wide[col], marker="o", label=col)
+
+    plt.xlabel("Sequence Length")
+    plt.ylabel("% Share of Total Avg Latency")
+    plt.title("Latency Share (%) vs Sequence Length per Operation")
+    plt.legend(bbox_to_anchor=(1.01, 1), loc="upper left", fontsize=8, frameon=False)
+    plt.grid(which="both", linestyle="--", alpha=0.4)
+    plt.ylim(0, 100)
+    plt.tight_layout()
+
+    path = os.path.join(out_dir, "comparison_pct_latency.png")
+    plt.savefig(path, dpi=200, bbox_inches="tight")
+    plt.close()
+    print(f"Saved % comparison plot → {path}")
 # ------------------------------------------------------------
 # Comparison plot — avg latency vs sequence length per op
 # ------------------------------------------------------------
@@ -212,6 +244,7 @@ def main():
     # Cross-sequence comparison plot
     if len(all_dfs) > 1:
         plot_comparison(all_dfs, out_dir)
+        plot_comparison_pct(all_dfs, out_dir)
 
     print("\nDone.")
 

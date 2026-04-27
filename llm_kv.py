@@ -164,9 +164,9 @@ class MultiHeadAttention(nn.Module):
 class FeedForward(nn.Module):
     def __init__(self, emb_dim, drop_rate):
         super().__init__()
-        self.lin1 = nn.Linear(emb_dim, emb_dim)
+        self.lin1 = nn.Linear(emb_dim, 4*emb_dim)
         self.act = nn.GELU()
-        self.lin2 = nn.Linear(emb_dim, emb_dim)
+        self.lin2 = nn.Linear(4*emb_dim, emb_dim)
         self.drop_rate = drop_rate
 
     def forward(self, x):
@@ -338,7 +338,7 @@ def main():
     )
     tokenizer = tiktoken.get_encoding("gpt2")
     decoded_text = tokenizer.decode(out.squeeze(0).tolist())
-    print("Output text:", decoded_text)
+    # print("Output text:", decoded_text)
     print("\n" + LATENCY.report())
 
 
