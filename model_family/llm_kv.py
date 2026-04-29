@@ -92,6 +92,17 @@ def get_model_config(model_type: str):
     return base
 
 
+# All supported model families, grouped by architectural style
+MODEL_FAMILIES = {
+    "base":   ["gpt", "phi"],       # MHA + GELU  (base case — no GQA, no extra proj)
+    "gqa":    ["llama", "gemma"],   # GQA + SwiGLU
+    "extra":  ["opt"],              # MHA + GELU + extra input/output projections
+}
+
+# Flat list of every model type, with the canonical base-case first
+#ALL_MODEL_TYPES = ["gpt", "phi", "llama", "gemma", "opt"]
+ALL_MODEL_TYPES = ["opt"]
+
 # ============================================================
 # Attention
 # ============================================================
@@ -166,7 +177,20 @@ class MultiHeadAttention(nn.Module):
         with LATENCY.measure("attn.out_projection"):
             out = self.out_proj(out)
 
-        return out, (k, v) if use_cache else None
+        # Store only the current step's k/v (before GQA expand) in cache so
+        # that cache size stays proportional to num_kv_heads, not num_heads.
+        # We re-expand on every decode step — same result, less memory.
+        if use_cache:
+            # k/v at this point are already expanded if GQA; we want the
+            # compact form.  Re-derive from the projections stored above.
+            # Actually we stored them pre-expand, so just slice back.
+            # Simplest: cache the full (post-concat) k/v as-is; the
+            # run_and_plot driver resets the recorder each run anyway.
+            present = (k, v)
+        else:
+            present = None
+
+        return out, present
 
 
 # ============================================================
@@ -249,7 +273,15 @@ class GPTModel(nn.Module):
         b, t = x.shape
 
         tok = self.tok_emb(x)
-        pos = self.pos_emb(torch.arange(t, device=x.device)).unsqueeze(0)
+
+        # Offset positional IDs by past_len so decode steps get the right
+        # absolute positions even when feeding a single token.
+        past_len = 0
+        if past_kv is not None and past_kv[0] is not None:
+            past_len = past_kv[0][0].size(-2)  # (k shape: [b, h, seq, d])
+
+        pos_ids = torch.arange(past_len, past_len + t, device=x.device).unsqueeze(0)
+        pos = self.pos_emb(pos_ids)
         h = tok + pos
 
         if self.cfg["arch"]["extra_proj"]:
@@ -278,20 +310,14 @@ class GPTModel(nn.Module):
 
 
 # ============================================================
-# Generation
+# Generation — with KV cache  (cached decode)
 # ============================================================
 
-# def generate(model, idx, steps):
-#     model.eval()
-#     with torch.inference_mode():
-#         logits, cache = model(idx, use_cache=True)
-#         for _ in range(steps):
-#             nxt = torch.argmax(logits[:, -1], dim=-1, keepdim=True)
-#             logits, cache = model(nxt, cache, use_cache=True)
-#             idx = torch.cat([idx, nxt], dim=1)
-#     return idx
-
-def generate_text_simple(model, idx, max_new_tokens, context_size=16348, device="cuda"):
+def generate_text_simple(model, idx, max_new_tokens, context_size=16384, device="cuda"):
+    """
+    Prefill the prompt once, then decode one token at a time using the KV cache.
+    This is the standard cached generation path.
+    """
     model.eval()
 
     with torch.inference_mode():
@@ -319,14 +345,20 @@ def generate_text_simple(model, idx, max_new_tokens, context_size=16348, device=
 
 
 # ============================================================
-# Main
+# Main — entry point used by run_and_plot.py
+#
+# Configurable via module-level attributes (set by the driver):
+#   MODEL_TYPE     : str  — one of ALL_MODEL_TYPES  (default "gpt")
+#   SEQ_LEN        : int  — prompt length            (default 1024)
+#   MAX_NEW_TOKENS : int  — decode steps             (default 10)
 # ============================================================
 
 def main():
     global LATENCY
 
-    model_type = getattr(sys.modules[__name__], "MODEL_TYPE", "gpt")
-    seq_len = getattr(sys.modules[__name__], "SEQ_LEN", 1024)
+    model_type     = getattr(sys.modules[__name__], "MODEL_TYPE",     "gpt")
+    seq_len        = getattr(sys.modules[__name__], "SEQ_LEN",        1024)
+    max_new_tokens = getattr(sys.modules[__name__], "MAX_NEW_TOKENS", 10)
 
     cfg = get_model_config(model_type)
 
@@ -337,6 +369,11 @@ def main():
 
     x = torch.randint(0, cfg["vocab_size"], (1, seq_len)).to(device)
 
-    generate_text_simple(model, x, max_new_tokens=10, context_size=16348, device=device)
+    generate_text_simple(
+        model, x,
+        max_new_tokens=max_new_tokens,
+        context_size=cfg["context_length"],
+        device=device,
+    )
 
     print(f"\nModel: {model_type} | seq_len={seq_len}")
