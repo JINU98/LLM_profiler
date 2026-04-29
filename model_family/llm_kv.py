@@ -100,8 +100,7 @@ MODEL_FAMILIES = {
 }
 
 # Flat list of every model type, with the canonical base-case first
-#ALL_MODEL_TYPES = ["gpt", "phi", "llama", "gemma", "opt"]
-ALL_MODEL_TYPES = [ "gemma"]
+ALL_MODEL_TYPES = ["gemma"]
 
 
 # ============================================================
@@ -163,10 +162,15 @@ class MultiHeadAttention(nn.Module):
 
         total_len = k.size(-2)
         if t > 1 or past_len > 0:
-            mask = torch.full((t, total_len), float("-inf"), device=x.device)
-            mask = torch.triu(mask, diagonal=1 + past_len)
+            # Build the mask once and cache it; only reallocate if shape changes.
+            cache_key = (t, total_len, past_len, x.device)
+            if not hasattr(self, "_mask_cache") or self._mask_cache_key != cache_key:
+                mask = torch.full((t, total_len), float("-inf"), device=x.device)
+                mask = torch.triu(mask, diagonal=1 + past_len)
+                self._mask_cache = mask
+                self._mask_cache_key = cache_key
             with LATENCY.measure("attn.apply_causal_mask"):
-                scores = scores + mask
+                scores = scores + self._mask_cache
 
         with LATENCY.measure("attn.softmax"):
             attn = F.softmax(scores, dim=-1)
