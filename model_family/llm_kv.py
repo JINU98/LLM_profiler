@@ -101,7 +101,8 @@ MODEL_FAMILIES = {
 
 # Flat list of every model type, with the canonical base-case first
 #ALL_MODEL_TYPES = ["gpt", "phi", "llama", "gemma", "opt"]
-ALL_MODEL_TYPES = ["opt"]
+ALL_MODEL_TYPES = [ "gemma"]
+
 
 # ============================================================
 # Attention
@@ -162,9 +163,10 @@ class MultiHeadAttention(nn.Module):
 
         total_len = k.size(-2)
         if t > 1 or past_len > 0:
-            mask = torch.triu(torch.ones(t, total_len, device=x.device), diagonal=1 + past_len).bool()
             with LATENCY.measure("attn.apply_causal_mask"):
-                scores = scores.masked_fill(mask, float("-inf"))
+                mask = torch.full((t, total_len), float("-inf"), device=x.device)
+                mask = torch.triu(mask, diagonal=1 + past_len)
+                scores = scores + mask
 
         with LATENCY.measure("attn.softmax"):
             attn = F.softmax(scores, dim=-1)
@@ -220,8 +222,14 @@ class FeedForward(nn.Module):
             with LATENCY.measure("ff.linear2"):
                 return self.lin2(x2)
         else:
-            with LATENCY.measure("ff.swiglu"):
-                return self.w3(F.silu(self.w1(x)) * self.w2(x))
+            with LATENCY.measure("ff.w1_gate"):
+                gate = self.w1(x)
+            with LATENCY.measure("ff.w2_up"):
+                up = self.w2(x)
+            with LATENCY.measure("ff.swiglu_act"):
+                hidden = F.silu(gate) * up
+            with LATENCY.measure("ff.w3_down"):
+                return self.w3(hidden)
 
 
 # ============================================================

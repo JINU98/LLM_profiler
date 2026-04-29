@@ -23,7 +23,8 @@ except Exception:
 # ------------------------------------------------------------
 # Sweep configuration
 # ------------------------------------------------------------
-SEQ_LENGTHS    = [512, 1024, 2048, 4096, 8192]
+#SEQ_LENGTHS    = [512, 1024, 2048, 4096, 8192]
+SEQ_LENGTHS    = [8192]
 MODEL_TYPES    = llm_kv.ALL_MODEL_TYPES   # ["gpt", "phi", "llama", "gemma", "opt"]
 MAX_NEW_TOKENS = 10
 
