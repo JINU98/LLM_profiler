@@ -54,7 +54,7 @@ PastKV = Tuple[torch.Tensor, torch.Tensor]
 def get_model_config(model_type: str):
     base = {
         "vocab_size": 30257,
-        "context_length": 16384,
+        "context_length": 8192,
         "emb_dim": 3072,
         "n_heads": 32,
         "n_layers": 32,
@@ -127,6 +127,14 @@ class MultiHeadAttention(nn.Module):
         self.v_proj = nn.Linear(d, kv_dim)
         self.out_proj = nn.Linear(d, d)
 
+        # Preallocate causal mask once as float16 to save GPU memory.
+        # A float32 16k×16k mask = 1 GB per layer; float16 halves that.
+        # forward() takes a zero-copy slice — no allocation at decode time.
+        max_len = cfg["context_length"]
+        mask = torch.full((max_len, max_len), float("-inf"), dtype=torch.float16)
+        mask = torch.triu(mask, diagonal=1)  # upper triangle=-inf, rest=0
+        self.register_buffer("causal_mask", mask, persistent=False)
+
     def forward(self, x, past_kv=None, use_cache=False):
         b, t, d = x.shape
 
@@ -162,15 +170,11 @@ class MultiHeadAttention(nn.Module):
 
         total_len = k.size(-2)
         if t > 1 or past_len > 0:
-            # Build the mask once and cache it; only reallocate if shape changes.
-            cache_key = (t, total_len, past_len, x.device)
-            if not hasattr(self, "_mask_cache") or self._mask_cache_key != cache_key:
-                mask = torch.full((t, total_len), float("-inf"), device=x.device)
-                mask = torch.triu(mask, diagonal=1 + past_len)
-                self._mask_cache = mask
-                self._mask_cache_key = cache_key
+            # Slice the prealloc buffer — no allocation, no recompute.
+            # Row i of the query attends to keys 0..past_len+i (inclusive),
+            # which is exactly what causal_mask[:t, :total_len] encodes.
             with LATENCY.measure("attn.apply_causal_mask"):
-                scores = scores + self._mask_cache
+                scores = scores + self.causal_mask[:t, :total_len]
 
         with LATENCY.measure("attn.softmax"):
             attn = F.softmax(scores, dim=-1)
@@ -292,7 +296,9 @@ class GPTModel(nn.Module):
         if past_kv is not None and past_kv[0] is not None:
             past_len = past_kv[0][0].size(-2)  # (k shape: [b, h, seq, d])
 
+        max_pos = self.pos_emb.num_embeddings - 1
         pos_ids = torch.arange(past_len, past_len + t, device=x.device).unsqueeze(0)
+        pos_ids = pos_ids.clamp(max=max_pos)  # guard against overflow at context boundary
         pos = self.pos_emb(pos_ids)
         h = tok + pos
 
@@ -325,7 +331,7 @@ class GPTModel(nn.Module):
 # Generation — with KV cache  (cached decode)
 # ============================================================
 
-def generate_text_simple(model, idx, max_new_tokens, context_size=16384, device="cuda"):
+def generate_text_simple(model, idx, max_new_tokens, context_size=8192, device="cuda"):
     """
     Prefill the prompt once, then decode one token at a time using the KV cache.
     This is the standard cached generation path.
@@ -337,18 +343,23 @@ def generate_text_simple(model, idx, max_new_tokens, context_size=16384, device=
         idx_cond = idx[:, -context_size:]
 
         if torch.cuda.is_available():
-            with torch.cuda.amp.autocast(dtype=torch.float16):
+            with torch.amp.autocast('cuda', dtype=torch.float16):
                 logits, past_kv = model(idx_cond, use_cache=True)
         else:
             logits, past_kv = model(idx_cond, use_cache=True)
 
         for _ in range(max_new_tokens):
+            # Stop if the KV cache has reached the context limit.
+            current_len = past_kv[0][0].size(-2) if past_kv and past_kv[0] is not None else idx_cond.size(1)
+            if current_len >= context_size:
+                break
+
             logits = logits[:, -1, :]
             idx_next = torch.argmax(logits, dim=-1, keepdim=True)
             idx = torch.cat((idx, idx_next), dim=1)
 
             if torch.cuda.is_available():
-                with torch.cuda.amp.autocast(dtype=torch.float16):
+                with torch.amp.autocast('cuda', dtype=torch.float16):
                     logits, past_kv = model(idx_next, past_kv=past_kv, use_cache=True)
             else:
                 logits, past_kv = model(idx_next, past_kv=past_kv, use_cache=True)
