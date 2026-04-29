@@ -281,14 +281,40 @@ class GPTModel(nn.Module):
 # Generation
 # ============================================================
 
-def generate(model, idx, steps):
+# def generate(model, idx, steps):
+#     model.eval()
+#     with torch.inference_mode():
+#         logits, cache = model(idx, use_cache=True)
+#         for _ in range(steps):
+#             nxt = torch.argmax(logits[:, -1], dim=-1, keepdim=True)
+#             logits, cache = model(nxt, cache, use_cache=True)
+#             idx = torch.cat([idx, nxt], dim=1)
+#     return idx
+
+def generate_text_simple(model, idx, max_new_tokens, context_size=16348, device="cuda"):
     model.eval()
+
     with torch.inference_mode():
-        logits, cache = model(idx, use_cache=True)
-        for _ in range(steps):
-            nxt = torch.argmax(logits[:, -1], dim=-1, keepdim=True)
-            logits, cache = model(nxt, cache, use_cache=True)
-            idx = torch.cat([idx, nxt], dim=1)
+        idx = idx.to(device)
+        idx_cond = idx[:, -context_size:]
+
+        if torch.cuda.is_available():
+            with torch.cuda.amp.autocast(dtype=torch.float16):
+                logits, past_kv = model(idx_cond, use_cache=True)
+        else:
+            logits, past_kv = model(idx_cond, use_cache=True)
+
+        for _ in range(max_new_tokens):
+            logits = logits[:, -1, :]
+            idx_next = torch.argmax(logits, dim=-1, keepdim=True)
+            idx = torch.cat((idx, idx_next), dim=1)
+
+            if torch.cuda.is_available():
+                with torch.cuda.amp.autocast(dtype=torch.float16):
+                    logits, past_kv = model(idx_next, past_kv=past_kv, use_cache=True)
+            else:
+                logits, past_kv = model(idx_next, past_kv=past_kv, use_cache=True)
+
     return idx
 
 
@@ -311,6 +337,6 @@ def main():
 
     x = torch.randint(0, cfg["vocab_size"], (1, seq_len)).to(device)
 
-    generate(model, x, steps=10)
+    generate_text_simple(model, x, max_new_tokens=10, context_size=16348, device=device)
 
     print(f"\nModel: {model_type} | seq_len={seq_len}")

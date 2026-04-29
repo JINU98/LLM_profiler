@@ -203,8 +203,10 @@ def main():
     os.makedirs(out_dir, exist_ok=True)
 
     all_dfs = {}   # seq_len -> DataFrame
-   # MODEL_TYPES = ["phi", "llama", "gemma", "opt"]
-    MODEL_TYPES = ["gemma", "opt"]
+#    MODEL_TYPES = ["phi", "llama", "gemma", "opt"]
+    MODEL_TYPES = [ "opt"]
+
+#    MODEL_TYPES = ["gemma", "opt"]
     for model_type in MODEL_TYPES:
         print(f"\n{'#'*60}")
         print(f" MODEL: {model_type.upper()}")
