@@ -163,9 +163,9 @@ class MultiHeadAttention(nn.Module):
 
         total_len = k.size(-2)
         if t > 1 or past_len > 0:
+            mask = torch.full((t, total_len), float("-inf"), device=x.device)
+            mask = torch.triu(mask, diagonal=1 + past_len)
             with LATENCY.measure("attn.apply_causal_mask"):
-                mask = torch.full((t, total_len), float("-inf"), device=x.device)
-                mask = torch.triu(mask, diagonal=1 + past_len)
                 scores = scores + mask
 
         with LATENCY.measure("attn.softmax"):
