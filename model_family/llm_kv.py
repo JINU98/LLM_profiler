@@ -100,8 +100,8 @@ MODEL_FAMILIES = {
 }
 
 # Flat list of every model type, with the canonical base-case first
-#ALL_MODEL_TYPES = ["gpt","phi","llama","gemma","opt"]
-ALL_MODEL_TYPES = ["opt"]
+ALL_MODEL_TYPES = ["gpt","phi","llama","gemma","opt"]
+#ALL_MODEL_TYPES = ["opt"]
 
 
 # ============================================================
